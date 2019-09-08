@@ -50,272 +50,248 @@ DEBUG=${DEBUG:-0}
 #DEBUG=1
 if [ $DEBUG -ge 1 ]
 then
-  ERR=/tmp/`basename $0`.err
+    ERR=/tmp/`basename $0`.err
 else
-  ERR=/dev/null
+    ERR=/dev/null
 fi
 if [ $DEBUG -ge 2 ]
 then
-  OUT=/tmp/`basename $0`.out
+    OUT=/tmp/`basename $0`.out
 else
-  OUT=/dev/null
+    OUT=/dev/null
 fi
 if [ $DEBUG -ge 3 ]
 then
-  DBG=/tmp/`basename $0`.dbg
+    DBG=/tmp/`basename $0`.dbg
 else
-  DBG=/dev/null
+    DBG=/dev/null
 fi
 errprint() {
-  [ $DEBUG -ne 0 ] && \
-  echo `date +%Y%m%d-%H%M%S:` $@ >> $ERR
+    [ $DEBUG -ne 0 ] && \
+    echo `date +%Y%m%d-%H%M%S:` $@ >> $ERR
 }
 
 
 adb_list() {
-  local DIR="$1"
-  [ -n "$DIR" ] || {
-    DIR="/"
-  }
+    local DIR="$1"
+    [ -n "$DIR" ] || {
+        DIR="/"
+    }
 
-if [ "$UPLOAD_BUSYBOX" = "yes" ]
-then
-  "$ADB" push "$BUSYBOX_ARMV5" "$BUSYBOX" 2>/dev/null
-  "$ADB" shell chmod 755 "$BUSYBOX"
-fi
+    if [ "$DIR" = "/" ]
+    then
+        "$ADB" devices | grep -w "device" | tr -d "\ +device" | {
+            while read line
+            do
+                PERMISSIONS=drwxrwxrwx
+                OWNER=root
+                GROUP=root
+                SIZE=0
+                DATETIME=$(date +"%m-%d-%Y %T")
+                FILE=$line
+                echo "$PERMISSIONS 1 $OWNER $GROUP $SIZE $DATETIME $PREFIX$FILE"
+            done
+        }
+    else
+        DEVICE=$(sed -r 's_^/([^/]+)(.*)_\1_g')
+        "$ADB" shell "ls -alln $DIR" \
+        | tr -d '\r' \
+        | tee $DBG \
+        | {
+            PREFIX="/"
+            DIR=$(sed -r 's_^/([^/]+)(.*)_\2_g')
+            while read -ra ITEMS
+            do
+                # possibly skip inaccessible stuff early
+                #false && \
+                case "${ITEMS[*]}" in
+                    *'Permission denied'*)
+                        errprint DENY ${ITEMS[*]}
+                        continue
+                    ;;
+                esac
+                # directory name can contain whitespace, don't probe for trailing colon
+                case "${ITEMS[0]}" in
+                    # Dir
+                    # drwxrwx--x    1 1000     1000         2048 Sun Dec 26 00:04:55 2010 data
+                    # File
+                    # -rwxr-x---    1 0        0          103208 Thu Jan  1 00:00:00 1970 init
+                    # Symlink
+                    # lrwxrwxrwx    1 0        0              11 Thu May 12 15:02:45 2011 etc -> /system/etc
 
-#"$ADB" shell "$BUSYBOX" ls --color=never -aelR "$DIR" | tr -d '\r' >adb.ls-lR
-
-# Caveat: We may not have "su" available and granted root access
-#"$ADB" shell "echo $BUSYBOX ls --color=never -aelR $DIR | su" \
-# Do not use "adb_cmd" here!
-# -n results in unknown UIDs and GIDs not to be mapped on user's values
-#"$ADB" shell "$BUSYBOX ls --color=never -aelR $DIR" \
-"$ADB" shell "$BUSYBOX ls --color=never -aelRn $DIR" \
-| tr -d '\r' \
-| tee $DBG \
-| {
-    PREFIX="/"
-    while read -ra ITEMS
-    do
-# possibly skip inaccessible stuff early
-#false && \
-      case "${ITEMS[*]}" in
-        *'Permission denied'*)
-          errprint DENY ${ITEMS[*]}
-          continue
-          ;;
-      esac
-# directory name can contain whitespace, don't probe for trailing colon
-      case "${ITEMS[0]}" in
-        # Dir entry:
-        # /data/tombstones:
-        '/'*)
-# use full line to include whitespace
-#          PREFIX="${ITEMS[0]%:}/" # Strip trailing ":", append '/'
-          PREFIX="${ITEMS[*]:0}"
-          PREFIX="${PREFIX%:}/" # Strip trailing ":", append '/'
-          PREFIX="${PREFIX/\/\///}" # Replace '//' by '/'
-          PREFIX="${PREFIX#/}" # Strip first "/"
-        ;;
-
-        # Dir
-        # drwxrwx--x    1 1000     1000         2048 Sun Dec 26 00:04:55 2010 data
-        # File
-        # -rwxr-x---    1 0        0          103208 Thu Jan  1 00:00:00 1970 init
-        # Symlink
-        # lrwxrwxrwx    1 0        0              11 Thu May 12 15:02:45 2011 etc -> /system/etc
-        d[rwxst-]????????|-[rwxst-]????????|l[rwxst-]????????)
-          PERMISSIONS="${ITEMS[0]}"
-#          LINKS="${ITEMS[1]}"
-          OWNER="${ITEMS[2]}"
-          GROUP="${ITEMS[3]}"
-          SIZE="${ITEMS[4]}"
-#          WDAY="${ITEMS[5]}"
-          MONTH="${ITEMS[6]}"
-          DAY="${ITEMS[7]}"
-# get time at second precision
-#          TIME="${ITEMS[8]%:*}" # Strip last two digits: 00:00:00 -> 00:00
-          TIME="${ITEMS[8]}"
-          YEAR="${ITEMS[9]}"
-          FILE="${ITEMS[*]:10}"
-
-# "cannot read link" errors may come in two lines:
-# ls: /proc/1/cwd: cannot read link: Permission denied
-# lrwxrwxrwx 1 root root 0 Sat Sep 19 13:34:01 2015 cwd
-# this situation must be handled somewhere else (if at all?)
-          case "$FILE" in
-            # the following situation hasn't been observed by me [steve8x8]
-            # lrwxrwxrwx    1 0        0               0 Fri May 13 09:13:22 2011 cwdls: /proc/1/cwd: cannot read link (not a symlink?)
-            *': cannot read link (not a symlink?)')
-              FILE="${FILE/ls: / -> }" # Replace ls: by ->
-              errprint READ link $FILE
-            ;;
-            '.'|'..')
-              continue # Skip '.' and '..' directory entries
-            ;;
-          esac
-
-          case "$DAY" in
-            [0-9]) DAY="0$DAY" ;;
-          esac
-
-          case "$MONTH" in
-            [0-9]) MONTH="0$MONTH" ;;
-            [0-9][0-9]) ;; # MONTH="$MONTH" ;;
-            Jan) MONTH="01" ;;
-            Feb) MONTH="02" ;;
-            Mar) MONTH="03" ;;
-            Apr) MONTH="04" ;;
-            May) MONTH="05" ;;
-            Jun) MONTH="06" ;;
-            Jul) MONTH="07" ;;
-            Aug) MONTH="08" ;;
-            Sep) MONTH="09" ;;
-            Oct) MONTH="10" ;;
-            Nov) MONTH="11" ;;
-            Dec) MONTH="12" ;;
-            *) MONTH="01" ;;
-          esac
-
-          echo "$PERMISSIONS 1 $OWNER $GROUP $SIZE $MONTH-$DAY-$YEAR $TIME $PREFIX$FILE"
-        ;;
-
-        # Device
-        # crw-rw----    1 1000     1005      10,  56 Thu May 12 15:02:45 2011 msm_pcm_in
-        [cb][rwxst-]????????)
-          PERMISSIONS="${ITEMS[0]}"
-#          LINKS="${ITEMS[1]}"
-          OWNER="${ITEMS[2]}"
-          GROUP="${ITEMS[3]}"
-          MAJOR="${ITEMS[4]%,}" # Strip trailing ","
-          MINOR="${ITEMS[5]}"
-#          WDAY="${ITEMS[6]}"
-          MONTH="${ITEMS[7]}"
-          DAY="${ITEMS[8]}"
-# get time at second precision
-#          TIME="${ITEMS[9]%:*}" # Strip last two digits: 00:00:00 -> 00:00
-          TIME="${ITEMS[9]}"
-          YEAR="${ITEMS[10]}"
-          FILE="${ITEMS[*]:11}"
-
-          case "$DAY" in
-            [0-9]) DAY="0$DAY" ;;
-          esac
-
-          case "$MONTH" in
-            [0-9]) MONTH="0$MONTH" ;;
-            [0-9][0-9]) ;; # MONTH="$MONTH" ;;
-            Jan) MONTH="01" ;;
-            Feb) MONTH="02" ;;
-            Mar) MONTH="03" ;;
-            Apr) MONTH="04" ;;
-            May) MONTH="05" ;;
-            Jun) MONTH="06" ;;
-            Jul) MONTH="07" ;;
-            Aug) MONTH="08" ;;
-            Sep) MONTH="09" ;;
-            Oct) MONTH="10" ;;
-            Nov) MONTH="11" ;;
-            Dec) MONTH="12" ;;
-            *) MONTH="01" ;;
-          esac
-
-          echo "$PERMISSIONS 1 $OWNER $GROUP $MAJOR, $MINOR $MONTH-$DAY-$YEAR $TIME $PREFIX$FILE"
-        ;;
-
-        # Handling of errors - This may be incomplete or even wrong!
-        # Insufficient permissions
-        # ls: can't open '/data': Permission denied
-        # Disappeared during access
-        # ls: /proc/20931/task/20931/fd/3: cannot read link: No such file or directory
-        # Caveat:
-        # If we don't *ignore* forbidden stuff here, it will be dup in the file display!
-        'ls:')
-          case "${ITEMS[*]}" in
-          *"can't open "*)
-            WHY="${ITEMS[*]:4}"
-            case "$WHY" in
-            *'Permission denied')
-#              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[3]//[\':]/} -> FORBIDDEN ${WHY}"
-              errprint DENY open ${ITEMS[3]//[\':]/} -\> ${ITEMS[*]}
-              ;;
-            *'No such file or directory')
-#              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[3]//[\':]/} -> GONE ${WHY}"
-              errprint GONE open ${ITEMS[3]//[\':]/} -\> ${ITEMS[*]}
-              ;;
-            *)
-              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[3]//[\':]/} -> UNKNOWN ${WHY}"
-              errprint UNKNOWN open ${ITEMS[3]//[\':]/} -\> ${ITEMS[*]}
-              ;;
-            esac
-            ;;
-          *'cannot read link'*)
-            WHY="${ITEMS[*]:5}"
-            case "$WHY" in
-            *'Permission denied')
-#              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> FORBIDDEN ${WHY}"
-              errprint DENY link ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
-              ;;
-            *'No such file or directory')
-#              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> GONE ${WHY}"
-              errprint GONE link ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
-              ;;
-            *)
-              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> UNKNOWN ${WHY}"
-              errprint UNKNOWN link ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
-              ;;
-            esac
-            ;;
-          *'Permission denied')
-#            echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> FORBIDDEN ${WHY}"
-            errprint DENY ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
-            ;;
-          *)
-            errprint UNKNOWN ${ITEMS[*]}
-            ;;
-          esac
-        ;;
-
-#        *)
-#          # Skip: empty lines and totals
-#        ;;
-      esac
-    done
-  } | tee $OUT
-
+                    # File
+                    # -rw-r--r--   1 0    0      16072 1970-01-01 01:00:00.000000000 +0100 plat_service_contexts
+                    # Directory
+                    # dr-xr-xr-x 590 0    0          0 1970-01-01 01:00:00.000000000 +0100 proc
+                    # Symlink
+                    # lrwxrwxrwx   1 0    0         15 1970-01-01 01:00:00.000000000 +0100 product -> /system/product
+                    d[rwxst-]????????|-[rwxst-]????????|l[rwxst-]????????)
+                        PERMISSIONS="${ITEMS[0]}"
+                        #          LINKS="${ITEMS[1]}"
+                        OWNER="${ITEMS[2]}"
+                        GROUP="${ITEMS[3]}"
+                        SIZE="${ITEMS[4]}"
+                        IFS='-' read -ra DATE <<< ${ITEMS[5]}
+                        YEAR="${DATE[0]}"
+                        MONTH="${DATE[1]}"
+                        DAY="${DATE[2]}"
+                        TIME="${ITEMS[6]%.*}"
+                        FILE="${ITEMS[*]:8}"
+                        
+                        # "cannot read link" errors may come in two lines:
+                        # ls: /proc/1/cwd: cannot read link: Permission denied
+                        # lrwxrwxrwx 1 root root 0 Sat Sep 19 13:34:01 2015 cwd
+                        # this situation must be handled somewhere else (if at all?)
+                        case "$FILE" in
+                            # the following situation hasn't been observed by me [steve8x8]
+                            # lrwxrwxrwx    1 0        0               0 Fri May 13 09:13:22 2011 cwdls: /proc/1/cwd: cannot read link (not a symlink?)
+                            *': cannot read link (not a symlink?)')
+                                FILE="${FILE/ls: / -> }" # Replace ls: by ->
+                                errprint READ link $FILE
+                            ;;
+                            '.'|'..')
+                                continue # Skip '.' and '..' directory entries
+                            ;;
+                        esac                        
+                        echo "$PERMISSIONS 1 $OWNER $GROUP $SIZE $MONTH-$DAY-$YEAR $TIME $PREFIX$FILE"
+                    ;;
+                    
+                    # Device
+                    # crw-rw----    1 1000     1005      10,  56 Thu May 12 15:02:45 2011 msm_pcm_in
+                    [cb][rwxst-]????????)
+                        PERMISSIONS="${ITEMS[0]}"
+                        #          LINKS="${ITEMS[1]}"
+                        OWNER="${ITEMS[2]}"
+                        GROUP="${ITEMS[3]}"
+                        MAJOR="${ITEMS[4]%,}" # Strip trailing ","
+                        MINOR="${ITEMS[5]}"
+                        #          WDAY="${ITEMS[6]}"
+                        MONTH="${ITEMS[7]}"
+                        DAY="${ITEMS[8]}"
+                        # get time at second precision
+                        #          TIME="${ITEMS[9]%:*}" # Strip last two digits: 00:00:00 -> 00:00
+                        TIME="${ITEMS[9]}"
+                        YEAR="${ITEMS[10]}"
+                        FILE="${ITEMS[*]:11}"
+                        
+                        case "$DAY" in
+                            [0-9]) DAY="0$DAY" ;;
+                        esac
+                        
+                        case "$MONTH" in
+                            [0-9]) MONTH="0$MONTH" ;;
+                            [0-9][0-9]) ;; # MONTH="$MONTH" ;;
+                            Jan) MONTH="01" ;;
+                            Feb) MONTH="02" ;;
+                            Mar) MONTH="03" ;;
+                            Apr) MONTH="04" ;;
+                            May) MONTH="05" ;;
+                            Jun) MONTH="06" ;;
+                            Jul) MONTH="07" ;;
+                            Aug) MONTH="08" ;;
+                            Sep) MONTH="09" ;;
+                            Oct) MONTH="10" ;;
+                            Nov) MONTH="11" ;;
+                            Dec) MONTH="12" ;;
+                            *) MONTH="01" ;;
+                        esac
+                        
+                        echo "$PERMISSIONS 1 $OWNER $GROUP $MAJOR, $MINOR $MONTH-$DAY-$YEAR $TIME $PREFIX$FILE"
+                    ;;
+                    
+                    # Handling of errors - This may be incomplete or even wrong!
+                    # Insufficient permissions
+                    # ls: can't open '/data': Permission denied
+                    # Disappeared during access
+                    # ls: /proc/20931/task/20931/fd/3: cannot read link: No such file or directory
+                    # Caveat:
+                    # If we don't *ignore* forbidden stuff here, it will be dup in the file display!
+                    'ls:')
+                        case "${ITEMS[*]}" in
+                            *"can't open "*)
+                                WHY="${ITEMS[*]:4}"
+                                case "$WHY" in
+                                    *'Permission denied')
+                                        #              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[3]//[\':]/} -> FORBIDDEN ${WHY}"
+                                        errprint DENY open ${ITEMS[3]//[\':]/} -\> ${ITEMS[*]}
+                                    ;;
+                                    *'No such file or directory')
+                                        #              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[3]//[\':]/} -> GONE ${WHY}"
+                                        errprint GONE open ${ITEMS[3]//[\':]/} -\> ${ITEMS[*]}
+                                    ;;
+                                    *)
+                                        echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[3]//[\':]/} -> UNKNOWN ${WHY}"
+                                        errprint UNKNOWN open ${ITEMS[3]//[\':]/} -\> ${ITEMS[*]}
+                                    ;;
+                                esac
+                            ;;
+                            *'cannot read link'*)
+                                WHY="${ITEMS[*]:5}"
+                                case "$WHY" in
+                                    *'Permission denied')
+                                        #              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> FORBIDDEN ${WHY}"
+                                        errprint DENY link ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
+                                    ;;
+                                    *'No such file or directory')
+                                        #              echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> GONE ${WHY}"
+                                        errprint GONE link ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
+                                    ;;
+                                    *)
+                                        echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> UNKNOWN ${WHY}"
+                                        errprint UNKNOWN link ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
+                                    ;;
+                                esac
+                            ;;
+                            *'Permission denied')
+                                #            echo "lrwxrwxrwx 1 0 0 0 01-01-1970 00:00:00 ${ITEMS[1]//[\':]/} -> FORBIDDEN ${WHY}"
+                                errprint DENY ${ITEMS[1]//[\':]/} -\> ${ITEMS[*]}
+                            ;;
+                            *)
+                                errprint UNKNOWN ${ITEMS[*]}
+                            ;;
+                        esac
+                    ;;
+                    
+                    #        *)
+                    #          # Skip: empty lines and totals
+                    #        ;;
+                esac
+            done
+        }
+    fi
+    } | tee $OUT
 }
 
 adb_copyout() {
-  FROM="$2"
-  TO="$3"
-  $ADB pull "$FROM" "$TO" &> /dev/null
+    FROM="$2"
+    TO="$3"
+    $ADB pull "$FROM" "$TO" &> /dev/null
 }
 
 adb_copyin() {
-  TO="$2"
-  FROM="$3"
-  $ADB push "$FROM" "$TO" &> /dev/null
+    TO="$2"
+    FROM="$3"
+    $ADB push "$FROM" "$TO" &> /dev/null
 }
 
 adb_mkdir() {
-  DIR="$2"
-  $ADB shell mkdir -p "$DIR" &> /dev/null
+    DIR="$2"
+    $ADB shell mkdir -p "$DIR" &> /dev/null
 }
 
 adb_rmdir() {
-  DIR="$2"
-#  $ADB shell rm -rf "$DIR" &> /dev/null
-  $ADB shell rmdir "$DIR" &> /dev/null
+    DIR="$2"
+    #  $ADB shell rm -rf "$DIR" &> /dev/null
+    $ADB shell rmdir "$DIR" &> /dev/null
 }
 
 adb_rm() {
-  FILE="$2"
-  $ADB shell rm -f "$FILE" &> /dev/null
+    FILE="$2"
+    $ADB shell rm -f "$FILE" &> /dev/null
 }
 
 adb_cmd() {
-  $ADB shell "$@" &> /dev/null
+    $ADB shell "$@" &> /dev/null
 }
 
 # override any locale for dates
@@ -326,40 +302,33 @@ ADB="${ADB:-`which adb`}"
 BUSYBOX="${BUSYBOX:-busybox}"
 
 if [ -z "$ADB" ]; then
-  echo "Error: could not find adb"
-  exit 1
+    echo "Error: could not find adb"
+    exit 1
 fi
 
 ADB_STATE=`"$ADB" get-state | tail -n1`
 if [ "$ADB_STATE" != "device" ]; then
-  "$ADB" kill-server > /dev/null 2>&1
-  "$ADB" usb         > /dev/null 2>&1
+    "$ADB" kill-server > /dev/null 2>&1
+    "$ADB" usb         > /dev/null 2>&1
 fi
 
 ADB_STATE=`"$ADB" get-state | tail -n1`
 if [ "$ADB_STATE" != "device" ]; then
-  echo "Error: adb cannot connect to device: $ADB_STATE"
-  exit 1
-fi
-
-# "which" may not exist at all - indicating missing busybox
-RBUSYBOX=`"$ADB" shell which "$BUSYBOX" | grep -v "not found"`
-if [ -z "$RBUSYBOX" ]; then
-  echo "Error: no $BUSYBOX on device"
-  exit 1
+    echo "Error: adb cannot connect to device: $ADB_STATE"
+    exit 1
 fi
 
 errprint COMMAND \""$@"\"
 COMMAND="$1"
 shift
 case "$COMMAND" in
-  list)    adb_list    "${1:-/}" ;;
-  copyout) adb_copyout "$@" ;;
-  copyin)  adb_copyin  "$@" ;;
-  mkdir)   adb_mkdir   "$@" ;;
-  rmdir)   adb_rmdir   "$@" ;;
-  rm)      adb_rm      "$@" ;;
-  *)       echo "Error: unknown command $@"; exit 1 ;;
+    list)    adb_list    "${1:-/}" ;;
+    copyout) adb_copyout "$@" ;;
+    copyin)  adb_copyin  "$@" ;;
+    mkdir)   adb_mkdir   "$@" ;;
+    rmdir)   adb_rmdir   "$@" ;;
+    rm)      adb_rm      "$@" ;;
+    *)       echo "Error: unknown command $@"; exit 1 ;;
 esac
 
 exit
